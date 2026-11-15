@@ -1,106 +1,115 @@
-# Industrial Anomaly Detection Platform
+# Industrial Anomaly Detection App
 
-An Unsupervised Industrial Surface Anomaly Detection platform inspired by the **PatchCore** Memory-Bank paradigm. Built with **Python, NumPy, OpenCV, FastAPI**, and **React 18 + Vite**.
+Upload an image -> get DEFECTIVE / NORMAL (from a validated threshold) + an anomaly heatmap.
+Model: PatchCore (Anomalib). Backend: FastAPI. Frontend: React + Tailwind (Vite).
 
----
-
-## 🌟 Key Features
-
-- **Unsupervised Learning:** Learns solely from defect-free normal images. No defect labels or manual annotations required.
-- **Ultra-Fast CPU Inference:** Vectorized matrix matching in **~35 milliseconds** per image without GPU dependencies.
-- **Multi-Product Support:** Built-in support for **Bottle** (209 references) and **Pill** (267 references).
-- **Dynamic Model Upload:** Click **"Add Model"** in the web interface to upload any MVTec category archive (`.zip`, `.tar`, `.tar.xz`) to compile a new product memory bank in under 2 seconds.
-- **Smart MVTec Archive Filter:** Automatically isolates `train/good` defect-free images from full archives, discarding test defects and masks.
-- **Dual-Scale Extreme-Value Energy Pooling:** Accurately catches micro-defects (cracks, tiny contamination pinholes) and macro-defects (broken structures, chips).
-- **Localization Heatmaps:** High-resolution OpenCV JET heatmap overlays showing the defect location.
-- **Interactive Web Interface:** Real-time adjustable threshold slider ($0.05$ – $0.95$), single image analysis, and multi-image batch inspection.
-
----
-
-## 🏗️ Architecture & Pipeline
-
-```
-[ Input Inspection Image ]
-            │
-            ▼
-[ Step 1: Normalization ] ────► Resized to 256×256 & converted to Grayscale
-            │
-            ▼
-[ Step 2: 1-NN Projection ] ──► Vectorized absolute difference against all normal memories:
-                               min_diff = min(|Memory_Bank - Input|)
-            │
-            ▼
-[ Step 3: Noise Suppression ] ─► 9×9 2D Gaussian Kernel smoothing
-            │
-            ▼
-[ Step 4: Product Masking ] ──► Adaptive foreground thresholding & morphological erosion
-            │
-            ▼
-[ Step 5: Dual-Scale Pooling ] ─► Metric = 0.6 * Top50_Mean + 0.4 * Top200_Mean
-            │
-            ▼
-[ Step 6: Normalization ] ────► Calibrated Anomaly Score ∈ [0.00, 1.00]
-            │
-            ├──► If Score >= Threshold: ❌ DEFECTIVE
-            └──► If Score <  Threshold: ✅ NORMAL
-            │
-            ▼
-[ Step 7: Heatmap Blending ] ─► Upscaled to original resolution + OpenCV JET Colormap
+## 1. Setup
+```bash
+python -m venv .venv && source .venv/bin/activate      # Windows: .venv\Scripts\activate
+pip install -r ai_engine/requirements.txt -r backend/requirements.txt
 ```
 
----
+## 2. Create the model (run from the project root)
+```bash
+python -m ai_engine.train       # downloads MVTec AD (category in config.py), builds memory bank
+python -m ai_engine.evaluate    # computes AUROC + F1-optimal threshold -> weights/<category>/threshold.json
+```
+Outputs: `ai_engine/weights/bottle/model.ckpt` and `threshold.json`.
 
-## 🚀 Quickstart Guide
+Change category: `CATEGORY=screw python -m ai_engine.train` (and evaluate), then set
+`MODEL_PATH` / `THRESHOLD_PATH` in `backend/.env`.
 
-### 1. Start the Backend (FastAPI + AI Engine)
+If auto-download fails, download MVTec AD manually and place a category at
+`data/mvtec_ad/bottle/{train/good,test,ground_truth}`.
+(Do not create an empty `bottle/` folder beforehand, or auto-download is skipped.)
 
-In PowerShell:
-```powershell
-cd "anomaly-app\backend"
-..\..\.venv\Scripts\Activate.ps1
+## 3. Run backend
+```bash
+cd backend
 uvicorn main:app --reload --port 8000
 ```
+API docs: http://localhost:8000/docs  (POST /predict, GET /history)
 
-Or in Git Bash:
+## 4. Run frontend
 ```bash
+cd frontend
+npm install
+npm run dev          # http://localhost:5173
+```
+
+## Notes
+- Anomalib's API changes between versions; this code targets anomalib >= 2.0 (falls back to `MVTec` for 1.x).
+  If `predict.py` fails to load the checkpoint, check the docs for your installed version.
+- Image conditions (camera angle, lighting, background) must match the training data.
+- One model per product category.
+- MVTec AD is licensed CC BY-NC-SA (non-commercial).
+
+
+1. Activate Virtual Environment & Run Backend
+bash
 cd /c/Users/jithi/Downloads/anomaly-app
 source .venv/Scripts/activate
 cd anomaly-app/backend
 uvicorn main:app --reload --port 8000
-```
-> Backend API: **`http://127.0.0.1:8000`** (Swagger docs at `/docs`)
-
----
-
-### 2. Start the Frontend (React + Vite)
-
-In a second terminal:
-```bash
-cd anomaly-app/frontend
-npm install
+2. Run Frontend
+bash
+cd /c/Users/jithi/Downloads/anomaly-app/anomaly-app/frontend
 npm run dev
-```
-> Frontend Web App: **`http://localhost:5173`**
 
----
 
-## 📦 Dataset Download Scripts
 
-To download the full standard MVTec benchmark datasets:
+Step 1: Model Architecture
 
-```powershell
-# Download all 209 Bottle normal images & defects
-python scripts/download_mvtec_bottle.py
+"We developed a custom unsupervised anomaly detection model based on a Memory-Bank and Nearest-Neighbor approach, inspired by PatchCore. Our memory bank contains 209 normal reference images."
 
-# Download all 267 Pill normal images & defects
-python scripts/download_mvtec_pill.py
-```
+Step 2: Image Preprocessing
 
----
+"First, we use OpenCV to resize the uploaded image to 256 × 256 pixels. Then we use cv2.cvtColor() with cv2.COLOR_BGR2GRAY to convert the three-channel BGR image into a single-channel grayscale image."
 
-## 🛠️ Tech Stack
+Step 3: Nearest-Neighbor Comparison
 
-- **Computer Vision & AI:** Python 3.11, NumPy, OpenCV
-- **Backend API:** FastAPI, Uvicorn, SQLAlchemy, SQLite, Pydantic
-- **Frontend UI:** React 18, Vite, Vanilla CSS (Dark Industrial Glassmorphism)
-- **Deployment:** Docker Compose ready
+"Next, we compare the uploaded grayscale image against all 209 normal reference images stored in our memory bank.
+
+We calculate the absolute pixel-wise differences and select the minimum difference at each pixel location.
+
+If a particular region has a large difference even from its closest normal reference, that region is considered potentially anomalous."
+
+Step 4: Residual Distance Map
+
+"Using these minimum pixel-wise differences, we generate a Residual Distance Map, which represents how much each pixel location differs from the stored normal references."
+
+Step 5: Noise Reduction and Foreground Masking
+
+"Next, we apply Gaussian Smoothing to reduce unwanted pixel noise.
+
+Then we perform Foreground Masking to isolate the product region from the background.
+
+We also apply Morphological Erosion to suppress unwanted boundary reflections."
+
+Step 6: Dual-Scale Pooling
+
+"After that, we calculate the anomaly score using two pooling methods.
+
+Micro-Scale Pooling selects the top 50 highest anomaly-valued pixels and calculates their average.
+
+Macro-Scale Pooling selects the top 200 highest anomaly-valued pixels and calculates their average."
+
+Step 7: Weighted Aggregation and Normalization
+
+"We combine the Micro and Macro averages using weighted aggregation, giving 60% weight to Micro and 40% to Macro.
+
+Then we divide the combined metric by 35 and clip the result to obtain a normalized anomaly score between 0 and 1."
+
+Step 8: Binary Classification
+
+"We compare the final anomaly score against a predefined threshold, which is 0.25 by default.
+
+If the score is greater than or equal to the threshold, the image is classified as DEFECTIVE. Otherwise, it is classified as NORMAL."
+
+Step 9: Heatmap Generation
+
+"Finally, we use OpenCV's JET Colormap to convert anomaly intensity values into different colors.
+
+High anomaly values appear in red, while lower values appear in cooler colors.
+
+We then use Alpha Blending to overlay the heatmap onto the original image, making the suspicious regions easier to identify."
