@@ -1,0 +1,26 @@
+[
+  {
+    "id": "bottle",
+    "name": "BOTTLE",
+    "subtitle": "MVTec Industrial Glass Bottle",
+    "image": "/bottle.png",
+    "recommendedThreshold": 0.25,
+    "numImages": 209
+  },
+  {
+    "id": "pill",
+    "name": "PILL",
+    "subtitle": "MVTec Pharmaceutical Pill & Tablet",
+    "image": "/pill.png",
+    "recommendedThreshold": 0.25,
+    "numImages": 267
+  },
+  {
+    "id": "screw",
+    "name": "SCREW",
+    "subtitle": "Custom MVTec / Factory Screw",
+    "image": "/screw.png",
+    "recommendedThreshold": 0.25,
+    "numImages": 320
+  }
+]

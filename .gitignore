@@ -1,0 +1,22 @@
+# Python & Virtualenv
+__pycache__/
+*.pyc
+.venv/
+*.db
+backend/*.db
+.env
+backend/.env
+
+# Node & Frontend Build
+node_modules/
+frontend/node_modules/
+dist/
+frontend/dist/
+
+# Dataset & Big Uploads
+data/
+ai_engine/weights/
+backend/uploads/
+*.log
+.DS_Store
+Thumbs.db
