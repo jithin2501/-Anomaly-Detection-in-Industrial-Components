@@ -1,352 +1,242 @@
-"""Anomaly detection inference module.
-Combines:
-1. Multi-reference normal memory matching for Bottle (detects structural breaks, chips, and contamination)
-2. Multi-reference normal memory matching for Pill (detects broken, chipped, cracked, or discolored pills)
-3. Synthetic benchmark template alignment
-4. General surface defect detection
+"""Unified Industrial Anomaly Detection Engine (ResNet PatchCore).
+A single, universal Deep Learning pipeline for all industrial components and surface textures.
+No category-specific if-else branching or hardcoded pixel rules.
 """
+import json
 from pathlib import Path
 import cv2
 import numpy as np
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torchvision.models as tv_models
 
 from .config import IMAGE_SIZE
 
-_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
-_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+_MEAN = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
+_STD = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
+
+
+class ResNetPatchCore(nn.Module):
+    """Deep feature extractor combining ResNet-18 layer2 & layer3 for industrial anomaly detection.
+    Yields 384-dimensional feature embeddings invariant to minor shifts and textures.
+    """
+    def __init__(self, resnet):
+        super().__init__()
+        self.conv1 = resnet.conv1
+        self.bn1 = resnet.bn1
+        self.relu = resnet.relu
+        self.maxpool = resnet.maxpool
+        self.layer1 = resnet.layer1
+        self.layer2 = resnet.layer2
+        self.layer3 = resnet.layer3
+
+    def forward(self, x):
+        x = self.maxpool(self.relu(self.bn1(self.conv1(x))))
+        x = self.layer1(x)
+        l2 = self.layer2(x)
+        l3 = self.layer3(l2)
+        l3_up = F.interpolate(l3, size=l2.shape[2:], mode="bilinear", align_corners=False)
+        feat = torch.cat([l2, l3_up], dim=1)
+        feat = F.avg_pool2d(feat, kernel_size=3, stride=1, padding=1)
+        return feat
 
 
 class CVAnomalyDetector:
-    """Industrial Surface Anomaly Detector based on Computer Vision & Reference Memory.
-    Supports both BOTTLE and PILL categories.
+    """Universal Deep Learning Anomaly Detector for any industrial part or surface.
+    Works automatically for objects (bottles, pills, screws, nuts) and textures (zipper, carpet, tile).
     """
     def __init__(self, threshold: float = 0.25):
         self.threshold = threshold
-        samples_dir = Path(__file__).resolve().parent.parent / "samples"
+        self.fe = None
+        self.coresets = {}
+        self.baselines = {}
+        self._load_registry_baselines()
 
-        # 1. Load synthetic normal template for bottle benchmark
-        synth_ref_path = samples_dir / "bottle_01_normal.png"
-        self.synth_ref = cv2.imread(str(synth_ref_path)) if synth_ref_path.is_file() else None
-
-        # 2. Load Bottle normal reference memory bank (from all 209 normal images)
-        self.bottle_refs = None
-        data_dir = Path(__file__).resolve().parent.parent / "data" / "mvtec_bottle"
-        npy_path = data_dir / "bottle_memory_bank_209.npy"
-        train_good_dir = data_dir / "train" / "good"
-
-        # Try fast pre-compiled memory bank
-        if npy_path.is_file():
+    def _load_registry_baselines(self):
+        reg_path = Path(__file__).resolve().parent.parent / "backend" / "models_registry.json"
+        if reg_path.is_file():
             try:
-                self.bottle_refs = np.load(str(npy_path))
+                data = json.loads(reg_path.read_text(encoding="utf-8"))
+                for entry in data:
+                    cid = entry.get("id")
+                    base = entry.get("featureBaseline")
+                    if cid and base:
+                        self.baselines[cid] = float(base)
             except Exception:
                 pass
 
-        # If not compiled yet, load directly from data/mvtec_bottle/train/good
-        if self.bottle_refs is None and train_good_dir.is_dir():
-            pngs = sorted(train_good_dir.glob("*.png"))
-            if pngs:
-                refs = []
-                for p in pngs:
-                    img = cv2.imread(str(p), cv2.IMREAD_GRAYSCALE)
-                    if img is not None:
-                        refs.append(cv2.resize(img, (256, 256)).astype(np.float32))
-                if refs:
-                    self.bottle_refs = np.stack(refs, axis=0)
+    def get_fe(self):
+        if self.fe is None:
+            resnet = tv_models.resnet18(weights=tv_models.ResNet18_Weights.DEFAULT).eval()
+            self.fe = ResNetPatchCore(resnet).eval()
+        return self.fe
 
-        # Fallback to samples if data folder not found
-        if self.bottle_refs is None:
-            bottle_names = [
-                "bottle_real_normal_good.png",
-                "bottle_real_normal_good_001.png",
-                "bottle_real_normal_good_002.png",
-                "bottle_real_normal_good_003.png",
-            ]
-            refs = []
-            for name in bottle_names:
-                p = samples_dir / name
-                if p.is_file():
-                    img = cv2.imread(str(p))
-                    if img is not None:
-                        resized = cv2.resize(img, (256, 256))
-                        gray = cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY).astype(np.float32)
-                        refs.append(gray)
-            if refs:
-                self.bottle_refs = np.stack(refs, axis=0)
-
-        # 3. Load Pill normal reference memory bank (from all 267 normal images)
-        self.pill_refs = None
-        pill_data_dir = Path(__file__).resolve().parent.parent / "data" / "mvtec_pill"
-        pill_npy_path = pill_data_dir / "pill_memory_bank_267.npy"
-        pill_train_dir = pill_data_dir / "train" / "good"
-
-        if pill_npy_path.is_file():
-            try:
-                self.pill_refs = np.load(str(pill_npy_path))
-            except Exception:
-                pass
-
-        if self.pill_refs is None and pill_train_dir.is_dir():
-            pngs = sorted(pill_train_dir.glob("*.png"))
-            if pngs:
-                refs = []
-                for p in pngs:
-                    img = cv2.imread(str(p), cv2.IMREAD_GRAYSCALE)
-                    if img is not None:
-                        refs.append(cv2.resize(img, (256, 256)).astype(np.float32))
-                if refs:
-                    self.pill_refs = np.stack(refs, axis=0)
-
-        # Fallback to samples if data folder not found
-        if self.pill_refs is None:
-            pill_names = [
-                "pill_002_normal.png",
-                "pill_003_normal.png",
-            ]
-            refs = []
-            for name in pill_names:
-                p = samples_dir / name
-                if p.is_file():
-                    img = cv2.imread(str(p))
-                    if img is not None:
-                        resized = cv2.resize(img, (256, 256))
-                        gray = cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY).astype(np.float32)
-                        refs.append(gray)
-            if refs:
-                self.pill_refs = np.stack(refs, axis=0)
-
-        # Dynamic memory bank registry for all added models
-        self.banks = {}
-        if self.bottle_refs is not None:
-            self.banks["bottle"] = self.bottle_refs
-        if self.pill_refs is not None:
-            self.banks["pill"] = self.pill_refs
-
-    def get_bank(self, category: str):
+    def get_coreset(self, category: str):
         cat = (category or "bottle").lower().strip()
-        if cat in self.banks:
-            return self.banks[cat]
+        if cat in self.coresets:
+            return self.coresets[cat]
 
-        # Scan for compiled memory bank in data/mvtec_<cat>/ or data/<cat>/
         data_root = Path(__file__).resolve().parent.parent / "data"
-        candidate_dirs = [
-            data_root / f"mvtec_{cat}",
-            data_root / cat
-        ]
+        candidate_dirs = [data_root / f"mvtec_{cat}", data_root / cat]
+
+        # 1. Try loading pre-compiled coreset
+        for cdir in candidate_dirs:
+            if cdir.is_dir():
+                pt_file = cdir / f"{cat}_coreset.pt"
+                if pt_file.is_file():
+                    try:
+                        coreset = torch.load(str(pt_file), map_location="cpu")
+                        self.coresets[cat] = coreset
+                        return coreset
+                    except Exception:
+                        pass
+
+        # 2. Build on-the-fly from memory bank if pt file not found
         for cdir in candidate_dirs:
             if cdir.is_dir():
                 for npy_file in cdir.glob("*memory_bank*.npy"):
                     try:
-                        b = np.load(str(npy_file))
-                        self.banks[cat] = b
-                        return b
+                        bank = np.load(str(npy_file))
+                        fe = self.get_fe()
+                        step = max(1, len(bank) // 60)
+                        sub_bank = bank[::step]
+                        rgb_bank = np.repeat(sub_bank[:, np.newaxis, :, :], 3, axis=1) / 255.0
+                        feats = []
+                        with torch.no_grad():
+                            for i in range(0, len(rgb_bank), 16):
+                                batch = (torch.tensor(rgb_bank[i:i+16], dtype=torch.float32) - _MEAN) / _STD
+                                feats.append(fe(batch).permute(0, 2, 3, 1).reshape(-1, 384))
+                        all_p = F.normalize(torch.cat(feats, dim=0), dim=-1)
+                        sub = all_p[torch.randperm(all_p.shape[0])[:6000]] if all_p.shape[0] > 6000 else all_p
+                        num_pts = min(2000, sub.shape[0])
+                        selected = [0]
+                        min_dists = 1.0 - torch.mm(sub, sub[0:1].t()).squeeze(1)
+                        for _ in range(num_pts - 1):
+                            idx = torch.argmax(min_dists).item()
+                            selected.append(idx)
+                            new_d = 1.0 - torch.mm(sub, sub[idx:idx+1].t()).squeeze(1)
+                            min_dists = torch.minimum(min_dists, new_d)
+                        coreset = sub[selected]
+                        torch.save(coreset, str(cdir / f"{cat}_coreset.pt"))
+                        self.coresets[cat] = coreset
+                        return coreset
                     except Exception:
                         pass
-                # Check raw png/jpg in train/good/
-                raw_dirs = [cdir / "train" / "good", cdir]
-                for rdir in raw_dirs:
-                    if rdir.is_dir():
-                        imgs = sorted(list(rdir.glob("*.png")) + list(rdir.glob("*.jpg")) + list(rdir.glob("*.jpeg")))
-                        if imgs:
-                            refs = []
-                            for p in imgs:
-                                im = cv2.imread(str(p), cv2.IMREAD_GRAYSCALE)
-                                if im is not None:
-                                    refs.append(cv2.resize(im, (256, 256)).astype(np.float32))
-                            if refs:
-                                b = np.stack(refs, axis=0)
-                                self.banks[cat] = b
-                                return b
         return None
 
+    def get_baseline(self, category: str) -> float:
+        cat = (category or "bottle").lower().strip()
+        if cat in self.baselines:
+            return self.baselines[cat]
+        self._load_registry_baselines()
+        return self.baselines.get(cat, 0.110)
+
+    def align_if_elongated(self, img):
+        """Standard rotation normalization for elongated mechanical components (e.g. screws, pins)."""
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if len(img.shape) == 3 else img
+        corners = [gray[0:20, 0:20], gray[0:20, -20:], gray[-20:, 0:20], gray[-20:, -20:]]
+        bg_val = float(np.median(corners))
+        diff = np.abs(gray.astype(np.float32) - bg_val)
+        pts = np.column_stack(np.where(diff > 35))
+        if len(pts) < 500:
+            return img, None
+        cov = np.cov(pts - np.mean(pts, axis=0), rowvar=False)
+        eigvals, eigvecs = np.linalg.eigh(cov)
+        # Check aspect ratio
+        if eigvals[1] / (eigvals[0] + 1e-6) < 3.0:
+            return img, None
+        v_long = eigvecs[:, 1]
+        angle_deg = np.degrees(np.arctan2(v_long[1], v_long[0]))
+        h_orig, w_orig = gray.shape[:2]
+        mean = np.mean(pts, axis=0)
+        M = cv2.getRotationMatrix2D((float(mean[1]), float(mean[0])), -angle_deg, 1.0)
+        M[0, 2] += (w_orig / 2.0 - mean[1])
+        M[1, 2] += (h_orig / 2.0 - mean[0])
+        aligned = cv2.warpAffine(img, M, (w_orig, h_orig), borderMode=cv2.BORDER_REPLICATE)
+        al_gray = cv2.cvtColor(aligned, cv2.COLOR_BGR2GRAY) if len(aligned.shape) == 3 else aligned
+        al_pts = np.column_stack(np.where(np.abs(al_gray.astype(np.float32) - bg_val) > 35))
+        if len(al_pts) > 0:
+            min_y, max_y = np.min(al_pts[:, 0]), np.max(al_pts[:, 0])
+            span = max_y - min_y
+            top_w = np.sum(al_pts[:, 0] < min_y + int(span * 0.25))
+            bot_w = np.sum(al_pts[:, 0] > max_y - int(span * 0.25))
+            if bot_w > top_w:
+                aligned = cv2.rotate(aligned, cv2.ROTATE_180)
+        return aligned, (M, (w_orig, h_orig))
+
     def predict(self, img_bgr, category: str = "bottle"):
+        """Universal prediction function for any industrial part or texture."""
         h, w = img_bgr.shape[:2]
         cat = (category or "bottle").lower().strip()
+        fe = self.get_fe()
+        coreset = self.get_coreset(cat)
 
-        # -----------------------------
-        # Category: PILL
-        # -----------------------------
-        if cat == "pill" and self.pill_refs is not None and len(self.pill_refs) > 0:
-            img_res = cv2.resize(img_bgr, (256, 256))
-            gray = cv2.cvtColor(img_res, cv2.COLOR_BGR2GRAY).astype(np.float32)
+        if coreset is None:
+            return 0.0, np.zeros((h, w), dtype=np.float32)
 
-            # Nearest distance across all 267 normal pill references
-            diffs = np.abs(self.pill_refs - gray)
-            min_diff = np.min(diffs, axis=0)
+        # 1. Pose Normalization for Elongated Parts
+        eval_img, align_info = self.align_if_elongated(img_bgr)
 
-            smoothed = cv2.GaussianBlur(min_diff, (9, 9), 2.5)
-            # Pill foreground is light object on dark background (> 40)
-            fg = (gray > 40).astype(np.float32)
+        # 2. Deep Feature Extraction (ResNet-18 Layer2 + Layer3)
+        rgb = cv2.cvtColor(cv2.resize(eval_img, (256, 256)), cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+        t = (torch.from_numpy(rgb).permute(2, 0, 1).unsqueeze(0) - _MEAN) / _STD
+
+        with torch.no_grad():
+            f = fe(t)
+            f_norm = F.normalize(f.permute(0, 2, 3, 1).reshape(-1, 384), dim=-1)
+            sim = torch.mm(f_norm, coreset.t())
+            max_sim, _ = sim.max(dim=1)
+            dist_32 = (1.0 - max_sim).reshape(32, 32).numpy()
+
+        # 3. Universal Foreground Analysis (Automated object vs texture detection)
+        gray = cv2.cvtColor(cv2.resize(eval_img, (256, 256)), cv2.COLOR_BGR2GRAY)
+        corners = [gray[0:20, 0:20], gray[0:20, -20:], gray[-20:, 0:20], gray[-20:, -20:]]
+        bg_val = float(np.median(corners))
+        diff = np.abs(gray.astype(np.float32) - bg_val)
+        fg = (diff > 25).astype(np.uint8)
+        fg_ratio = float(np.sum(fg > 0)) / (256 * 256)
+
+        if 0.03 < fg_ratio < 0.70:
+            # Discrete object on inspection tray/conveyor: mask background
             fg_eroded = cv2.erode(fg, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)))
-            amap_small = smoothed * fg_eroded
+            fg_32 = (cv2.resize(fg_eroded, (32, 32), interpolation=cv2.INTER_AREA) > 0.5)
+            amap_smooth = cv2.GaussianBlur(dist_32 * fg_32.astype(np.float32), (3, 3), 1.0)
+            valid = amap_smooth[fg_32]
+            raw_metric = float(np.mean(np.sort(valid)[-4:])) if len(valid) > 5 else 0.0
+            amap_eval = amap_smooth
+        else:
+            # Full surface / texture (zipper, carpet, leather, tile): evaluate full surface
+            amap_smooth = cv2.GaussianBlur(dist_32, (3, 3), 1.0)
+            raw_metric = float(np.mean(np.sort(amap_smooth.ravel())[-4:]))
+            amap_eval = amap_smooth
 
-            valid = amap_small[fg_eroded > 0]
-            if len(valid) > 200:
-                top_50 = float(np.mean(np.sort(valid)[-50:]))
-                top_200 = float(np.mean(np.sort(valid)[-200:]))
-                metric = 0.6 * top_50 + 0.4 * top_200
-            elif len(valid) > 0:
-                metric = float(np.max(valid))
-            else:
-                metric = 0.0
+        # 4. Universal Normalized Score
+        baseline = self.get_baseline(cat)
+        if raw_metric <= baseline:
+            final_score = float((raw_metric / baseline) * 0.21)
+        else:
+            final_score = float(0.25 + min(0.75, (raw_metric - baseline) / (baseline * 0.35) * 0.75))
 
-            # Normal pills score 0.00 - 0.04, defect pills score 0.37 - 1.00
-            score = float(np.clip((metric - 0.7) / 7.0, 0.0, 1.0))
-            amap_norm = np.clip(amap_small / 8.0, 0.0, 1.0)
-            amap = cv2.resize(amap_norm, (w, h))
-            return score, amap
+        # 5. Anomaly Map Resizing & Unaligning
+        norm_map = np.clip(amap_eval / (baseline + 1e-8) * 0.25, 0.0, 1.0)
+        if align_info is not None:
+            M, (w_orig, h_orig) = align_info
+            M_inv = cv2.invertAffineTransform(M)
+            amap_full = cv2.warpAffine(cv2.resize(norm_map, (w_orig, h_orig)), M_inv, (w, h), borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+        else:
+            amap_full = cv2.resize(norm_map, (w, h))
 
-        # -----------------------------
-        # Category: BOTTLE
-        # -----------------------------
-        # Mode A: Synthetic Benchmark Images (~384x512)
-        if self.synth_ref is not None and abs(w - 384) < 40 and abs(h - 512) < 40:
-            ref = cv2.resize(self.synth_ref, (w, h))
-            diff = cv2.absdiff(img_bgr, ref)
-            gray_diff = cv2.cvtColor(diff, cv2.COLOR_BGR2GRAY)
-            clean_diff = np.where(gray_diff > 25, gray_diff, 0).astype(np.float32) / 255.0
-            amap = cv2.GaussianBlur(clean_diff, (11, 11), 3.0)
-            p99 = float(np.percentile(amap, 99.8))
-            area = float(np.sum(amap > 0.08)) / (w * h)
-            score = float(np.clip(p99 * 0.7 + area * 20.0, 0.0, 1.0))
-            return score, amap
-
-        # Mode B: High-Resolution Industrial Images (MVTec Bottle photography)
-        if cat == "bottle" and self.bottle_refs is not None and len(self.bottle_refs) > 0 and (w >= 600 or h >= 600):
-            img_res = cv2.resize(img_bgr, (256, 256))
-            gray = cv2.cvtColor(img_res, cv2.COLOR_BGR2GRAY).astype(np.float32)
-
-            diffs = np.abs(self.bottle_refs - gray)
-            min_diff = np.min(diffs, axis=0)
-
-            smoothed = cv2.GaussianBlur(min_diff, (9, 9), 2.5)
-            fg = (gray < 240).astype(np.float32)
-            fg_eroded = cv2.erode(fg, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)))
-            amap_small = smoothed * fg_eroded
-
-            valid_pixels = amap_small[fg_eroded > 0]
-            if len(valid_pixels) > 200:
-                top_50 = float(np.mean(np.sort(valid_pixels)[-50:]))
-                top_200 = float(np.mean(np.sort(valid_pixels)[-200:]))
-                metric = 0.6 * top_50 + 0.4 * top_200
-            elif len(valid_pixels) > 0:
-                metric = float(np.max(valid_pixels))
-            else:
-                metric = 0.0
-
-            score = float(np.clip(metric / 35.0, 0.0, 1.0))
-            amap_norm = np.clip(amap_small / 30.0, 0.0, 1.0)
-            amap = cv2.resize(amap_norm, (w, h))
-            return score, amap
-
-        # -----------------------------
-        # Category: DYNAMIC CUSTOM PRODUCT (Any uploaded model e.g. screw, hazelnut, etc.)
-        # -----------------------------
-        custom_bank = self.get_bank(cat)
-        if custom_bank is not None and len(custom_bank) > 0:
-            img_res = cv2.resize(img_bgr, (256, 256))
-            gray = cv2.cvtColor(img_res, cv2.COLOR_BGR2GRAY).astype(np.float32)
-
-            # Minimum distance across all stored normal memories
-            diffs = np.abs(custom_bank - gray)
-            min_diff = np.min(diffs, axis=0)
-
-            smoothed = cv2.GaussianBlur(min_diff, (9, 9), 2.5)
-
-            # Adaptive background detection based on corner luminance
-            corners = [gray[0:20, 0:20], gray[0:20, -20:], gray[-20:, 0:20], gray[-20:, -20:]]
-            corner_mean = float(np.mean([np.mean(c) for c in corners]))
-            if corner_mean > 140:
-                # Bright or gray background (bottle, screw) -> foreground is darker object
-                fg = (gray < (corner_mean - 20)).astype(np.float32)
-                fg_eroded = cv2.erode(fg, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)))
-                scale_div = 35.0
-            elif corner_mean < 70:
-                # Dark background (pill, dark conveyor) -> foreground is lighter object
-                fg = (gray > (corner_mean + 25)).astype(np.float32)
-                fg_eroded = cv2.erode(fg, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)))
-                scale_div = 12.0
-            else:
-                # Full texture surfaces (leather, carpet, wood) -> inspect full surface
-                fg = np.ones((256, 256), dtype=np.float32)
-                fg_eroded = cv2.erode(fg, cv2.getStructuringElement(cv2.MORPH_RECT, (7, 7)))
-                scale_div = 25.0
-
-            amap_small = smoothed * fg_eroded
-            valid = amap_small[fg_eroded > 0]
-            if len(valid) > 200:
-                top_50 = float(np.mean(np.sort(valid)[-50:]))
-                top_200 = float(np.mean(np.sort(valid)[-200:]))
-                metric = 0.6 * top_50 + 0.4 * top_200
-            elif len(valid) > 0:
-                metric = float(np.max(valid))
-            else:
-                metric = 0.0
-
-            if corner_mean < 70:
-                score = float(np.clip((metric - 0.7) / 7.0, 0.0, 1.0))
-            else:
-                score = float(np.clip(metric / scale_div, 0.0, 1.0))
-
-            amap_norm = np.clip(amap_small / (scale_div * 0.8), 0.0, 1.0)
-            amap = cv2.resize(amap_norm, (w, h))
-            return score, amap
-
-        # Mode C: General / Outside surface images
-        gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
-        smooth = cv2.bilateralFilter(gray, 7, 35, 35)
-        hf_diff = cv2.absdiff(gray, smooth).astype(np.float32) / 255.0
-
-        k_fine = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-        bh = cv2.morphologyEx(gray, cv2.MORPH_BLACKHAT, k_fine).astype(np.float32) / 255.0
-        th = cv2.morphologyEx(gray, cv2.MORPH_TOPHAT, k_fine).astype(np.float32) / 255.0
-
-        k_v = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 11))
-        k_h = cv2.getStructuringElement(cv2.MORPH_RECT, (11, 1))
-        lines = cv2.morphologyEx(hf_diff, cv2.MORPH_OPEN, k_v) + cv2.morphologyEx(hf_diff, cv2.MORPH_OPEN, k_h)
-        flaws = np.maximum(0.0, hf_diff - 0.8 * lines)
-
-        combined = 0.5 * flaws + 0.3 * bh + 0.2 * th
-        defect_sig = np.maximum(0.0, combined - 0.04)
-        amap = cv2.GaussianBlur(defect_sig, (7, 7), 2.0)
-
-        top_mean = float(np.mean(np.sort(amap.ravel())[-150:]))
-        score = float(np.clip((top_mean - 0.015) * 3.8, 0.0, 1.0))
-        return score, amap
+        return final_score, amap_full
 
 
 def load_model(ckpt_path=None):
-    """Load model engine."""
-    p = Path(ckpt_path) if ckpt_path else None
-    if p and p.is_file():
-        try:
-            import torch
-            from anomalib.models import Patchcore
-            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-            model = Patchcore.load_from_checkpoint(str(p), map_location=device)
-            model.eval().to(device)
-            return model
-        except Exception:
-            pass
+    """Load universal anomaly detector."""
     return CVAnomalyDetector()
 
 
 def run_model(model, img_bgr, category: str = "bottle"):
     """Return (score: float, anomaly_map: 2D numpy array)."""
-    if isinstance(model, CVAnomalyDetector):
+    if hasattr(model, "predict"):
         return model.predict(img_bgr, category=category)
-
-    try:
-        import torch
-        device = next(model.parameters()).device
-        with torch.no_grad():
-            rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
-            rgb = cv2.resize(rgb, (IMAGE_SIZE, IMAGE_SIZE)).astype(np.float32) / 255.0
-            rgb = (rgb - _MEAN) / _STD
-            tensor = torch.from_numpy(rgb).permute(2, 0, 1).unsqueeze(0).to(device)
-            out = model.model(tensor)
-            if isinstance(out, dict):
-                score, amap = out["pred_score"], out["anomaly_map"]
-            else:
-                score, amap = out.pred_score, out.anomaly_map
-            return float(score.reshape(-1)[0].cpu()), amap.squeeze().cpu().numpy()
-    except Exception:
-        return CVAnomalyDetector().predict(img_bgr, category=category)
+    return 0.0, np.zeros((img_bgr.shape[0], img_bgr.shape[1]), dtype=np.float32)

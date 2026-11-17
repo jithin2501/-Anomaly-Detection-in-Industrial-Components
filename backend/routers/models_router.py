@@ -147,6 +147,7 @@ async def add_model(
     image_dict = extract_normal_images_from_archive(content, file.filename)
 
     refs = []
+    rgb_imgs = []
     first_thumb = None
 
     for img_name in sorted(image_dict.keys()):
@@ -159,6 +160,7 @@ async def add_model(
                 gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
                 resized = cv2.resize(gray, (256, 256)).astype(np.float32)
                 refs.append(resized)
+                rgb_imgs.append(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
         except Exception:
             continue
 
@@ -173,6 +175,65 @@ async def add_model(
     target_dir.mkdir(parents=True, exist_ok=True)
     bank_path = target_dir / f"{clean_name}_memory_bank.npy"
     np.save(str(bank_path), bank)
+
+    # Automatically compile deep ResNet feature coreset and calibrate baseline
+    coreset = None
+    feature_baseline = 0.110
+    try:
+        import torch
+        from ai_engine.predict import ResNetPatchCore, _MEAN, _STD
+        import torchvision.models as tv_models
+
+        fe = ResNetPatchCore(tv_models.resnet18(weights=tv_models.ResNet18_Weights.DEFAULT).eval())
+        step = max(1, len(rgb_imgs) // 60)
+        selected_imgs = rgb_imgs[::step]
+
+        batch_tensors = []
+        for im in selected_imgs:
+            im_res = cv2.resize(im, (256, 256))
+            t = torch.from_numpy(im_res.astype(np.float32) / 255.0).permute(2, 0, 1)
+            batch_tensors.append(t)
+
+        feats = []
+        with torch.no_grad():
+            for i in range(0, len(batch_tensors), 16):
+                batch = torch.stack(batch_tensors[i:i + 16])
+                batch = (batch - _MEAN) / _STD
+                f = fe(batch)
+                B, C, H, W = f.shape
+                f_flat = f.permute(0, 2, 3, 1).reshape(-1, C)
+                feats.append(f_flat)
+
+        all_patches = torch.cat(feats, dim=0)
+        all_patches = torch.nn.functional.normalize(all_patches, dim=-1)
+
+        N_p = all_patches.shape[0]
+        sub_patches = all_patches[torch.randperm(N_p)[:6000]] if N_p > 6000 else all_patches
+        num_points = min(2000, sub_patches.shape[0])
+        selected = [0]
+        min_dists = 1.0 - torch.mm(sub_patches, sub_patches[0:1].t()).squeeze(1)
+        for _ in range(num_points - 1):
+            idx = torch.argmax(min_dists).item()
+            selected.append(idx)
+            new_dist = 1.0 - torch.mm(sub_patches, sub_patches[idx:idx + 1].t()).squeeze(1)
+            min_dists = torch.minimum(min_dists, new_dist)
+
+        coreset = sub_patches[selected]
+        coreset_path = target_dir / f"{clean_name}_coreset.pt"
+        torch.save(coreset, str(coreset_path))
+
+        # Measure baseline distance on training images
+        train_dists = []
+        with torch.no_grad():
+            for t_img in batch_tensors[:20]:
+                t_in = ((t_img.unsqueeze(0) - _MEAN) / _STD)
+                f_test = torch.nn.functional.normalize(fe(t_in).permute(0, 2, 3, 1).reshape(-1, 384), dim=-1)
+                dist_t = (1.0 - torch.mm(f_test, coreset.t()).max(dim=1)[0]).numpy()
+                train_dists.append(float(np.mean(np.sort(dist_t)[-4:])))
+        if train_dists:
+            feature_baseline = round(float(np.percentile(train_dists, 95)) * 1.15, 4)
+    except Exception:
+        coreset = None
 
     # Save thumbnail to frontend public directory
     thumb_filename = f"{clean_name}.png"
@@ -195,6 +256,7 @@ async def add_model(
         "subtitle": f"Custom MVTec / Factory {name.strip().title()}",
         "image": thumb_rel_url,
         "recommendedThreshold": 0.25,
+        "featureBaseline": feature_baseline,
         "numImages": len(refs),
     }
 
@@ -205,11 +267,14 @@ async def add_model(
 
     save_registry(registry)
 
-    # Register into live memory bank in inference service
+    # Register into live memory bank & coreset in inference service
     try:
         from services import inference_service
-        if hasattr(inference_service, "_model") and hasattr(inference_service._model, "banks"):
-            inference_service._model.banks[clean_name] = bank
+        if hasattr(inference_service, "_model"):
+            if hasattr(inference_service._model, "coresets") and coreset is not None:
+                inference_service._model.coresets[clean_name] = coreset
+            if hasattr(inference_service._model, "baselines"):
+                inference_service._model.baselines[clean_name] = feature_baseline
     except Exception:
         pass
 
