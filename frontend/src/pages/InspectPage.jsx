@@ -1,12 +1,12 @@
 import { useState } from "react";
-import MaterialSelector, { MATERIALS } from "../components/MaterialSelector.jsx";
+import MaterialSelector from "../components/MaterialSelector.jsx";
 import ModeSelection from "../components/ModeSelection.jsx";
 import SingleInspect from "../components/SingleInspect.jsx";
 import FolderInspect from "../components/FolderInspect.jsx";
 
 export default function InspectPage({ stage, setStage }) {
-  const [selectedMaterial, setSelectedMaterial] = useState(MATERIALS[0]);
-  const [threshold, setThreshold] = useState(MATERIALS[0].recommendedThreshold || 0.25);
+  const [selectedMaterial, setSelectedMaterial] = useState(null);
+  const [threshold, setThreshold] = useState(0.25);
 
   function handleSelectMaterial(mat) {
     setSelectedMaterial(mat);

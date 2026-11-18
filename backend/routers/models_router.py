@@ -283,3 +283,40 @@ async def add_model(
         "message": f"Successfully compiled {len(refs)} normal images for '{clean_name.upper()}'.",
         "model": model_entry,
     }
+
+
+@router.delete("/{model_id}")
+def delete_model(model_id: str):
+    """Deletes a custom model from the registry, disk, and live memory."""
+    clean_id = re.sub(r"[^a-zA-Z0-9_\-]", "", model_id.strip().lower())
+    registry = load_registry()
+    entry = next((m for m in registry if m["id"] == clean_id), None)
+    if not entry:
+        raise HTTPException(status_code=404, detail=f"Model '{clean_id}' not found.")
+
+    registry = [m for m in registry if m["id"] != clean_id]
+    save_registry(registry)
+
+    # Clean up data folder and thumbnail
+    import shutil
+    target_dir = DATA_DIR / f"mvtec_{clean_id}"
+    if target_dir.is_dir():
+        shutil.rmtree(str(target_dir), ignore_errors=True)
+
+    thumb_path = FRONTEND_PUBLIC / f"{clean_id}.png"
+    if thumb_path.is_file():
+        thumb_path.unlink(missing_ok=True)
+
+    # Remove from live inference service
+    try:
+        from services import inference_service
+        if hasattr(inference_service, "_model"):
+            if hasattr(inference_service._model, "coresets"):
+                inference_service._model.coresets.pop(clean_id, None)
+            if hasattr(inference_service._model, "baselines"):
+                inference_service._model.baselines.pop(clean_id, None)
+    except Exception:
+        pass
+
+    return {"success": True, "message": f"Deleted model '{clean_id}'."}
+

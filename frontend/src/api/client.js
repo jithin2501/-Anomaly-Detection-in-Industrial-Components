@@ -47,3 +47,14 @@ export async function addModel(productName, zipFile) {
   }
   return res.json();
 }
+
+export async function deleteModel(modelId) {
+  const res = await fetch(`${API}/models/${modelId}`, {
+    method: "DELETE",
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || `Failed to delete model (${res.status})`);
+  }
+  return res.json();
+}

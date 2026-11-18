@@ -2,20 +2,11 @@
   {
     "id": "bottle",
     "name": "BOTTLE",
-    "subtitle": "MVTec Industrial Glass Bottle",
+    "subtitle": "Custom MVTec / Factory Bottle",
     "image": "/bottle.png",
     "recommendedThreshold": 0.25,
-    "featureBaseline": 0.12,
+    "featureBaseline": 0.1229,
     "numImages": 209
-  },
-  {
-    "id": "pill",
-    "name": "PILL",
-    "subtitle": "MVTec Pharmaceutical Pill & Tablet",
-    "image": "/pill.png",
-    "recommendedThreshold": 0.25,
-    "featureBaseline": 0.125,
-    "numImages": 267
   },
   {
     "id": "screw",
@@ -23,16 +14,7 @@
     "subtitle": "Custom MVTec / Factory Screw",
     "image": "/screw.png",
     "recommendedThreshold": 0.25,
-    "featureBaseline": 0.082,
+    "featureBaseline": 0.1625,
     "numImages": 320
-  },
-  {
-    "id": "zipper",
-    "name": "ZIPPER",
-    "subtitle": "Custom MVTec / Factory Zipper",
-    "image": "/zipper.png",
-    "recommendedThreshold": 0.25,
-    "featureBaseline": 0.1034,
-    "numImages": 240
   }
 ]

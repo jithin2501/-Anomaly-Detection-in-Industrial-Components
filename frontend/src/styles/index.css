@@ -1229,6 +1229,35 @@ body {
   border-radius: 6px;
 }
 
+/* Delete button & Model status badges */
+.btn-delete-model {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  background: rgba(18, 18, 22, 0.85);
+  backdrop-filter: blur(4px);
+  border: 1px solid rgba(239, 68, 68, 0.4);
+  color: #f87171;
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  z-index: 10;
+  padding: 0;
+}
+
+.btn-delete-model:hover {
+  background: #ef4444;
+  color: #ffffff;
+  border-color: #dc2626;
+  transform: scale(1.1);
+  box-shadow: 0 4px 14px rgba(239, 68, 68, 0.45);
+}
+
 /* Screen 2: Mode Selection Layout */
 .mode-selection-layout {
   display: grid;
